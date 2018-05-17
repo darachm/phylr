@@ -19,9 +19,7 @@ def query_pubmed_elink(pubmed_id,linkname):
   r = requests.get(
     'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi',
     params=parameters)
-  print(r.url)
-  print(r.content)
-  print(r.json())
+  return(r.json())
 
 def query_pubmed_esummary(pubmed_id):
   parameters = {
@@ -34,9 +32,6 @@ def query_pubmed_esummary(pubmed_id):
   r = requests.get(
     'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi',
     params=parameters)
-  print(r.url)
-  print(r.content)
-  print(r.json())
   return(r.json())
 
 if __name__=="__main__":
@@ -45,47 +40,51 @@ if __name__=="__main__":
   args = parser.parse_args()
 
   article_metadata = {}
-   = {}
+  graph_list = []
   
   for i in args.pubmed_ids:
-    query_pubmed_esummary(i)
-    query_pubmed_elink(i,'pubmed_pubmed_refs')
-    query_pubmed_elink(i,'pubmed_pubmed_citedin')
 
+    raw_metadata = query_pubmed_esummary(i)['result']
+    metadata = raw_metadata[raw_metadata['uids'][0]]
+    article_metadata[i] = {'title':metadata['title']}#,'all_metadata':metadata}
 
+    raw_refs = query_pubmed_elink(i,'pubmed_pubmed_refs')
+    refs = raw_refs['linksets'][0]['linksetdbs'][0]['links']
+    for j in refs:
+      graph_list.append( (i,j) )
 
-#graph_lists = append_graph_list(graph_lists,
-#              ( meet ,
-#                goal_vertex ), 
-#              "meet", "goal", len(meet_persons)-0.1 )
-#
-## Build index
-#  verticies = set()
-#  for edge in graph_lists.el:
-#    verticies.add(edge[0])
-#    verticies.add(edge[1])
-#  name_to_id = {}
-#  id_to_name = {}
-#  id_counter = 0
-#  for vertex in verticies:
-#    id_to_name[id_counter] = vertex
-#    name_to_id[vertex] = id_counter
-#    id_counter += 1
-#  
-#  sanitary_edge_list = []
-#  edge_capacity_list = []
-#  type_map = {}
-#  for i, edge in enumerate(graph_lists.el):
-#    sanitary_edge_list.append(( name_to_id[edge[0]], name_to_id[edge[1]] ))
-#    edge_capacity_list.append(graph_lists.cl[i])
-#    type_map[name_to_id[edge[0]]] = graph_lists.tl0[i]
-#    type_map[name_to_id[edge[1]]] = graph_lists.tl1[i]
-#
-#  g = igraph.Graph(sanitary_edge_list,directed=True)
-#  g.es["capacity"] = edge_capacity_list
-#
-#  g.simplify(combine_edges=max)
-#  g.vs["type"] = [   type_map[v.index] for v in list(g.vs) ]
-#  g.vs["name"] = [ id_to_name[v.index] for v in list(g.vs) ]
-#  g.vs["label"] = g.vs["name"]
-#
+    raw_citedby = query_pubmed_elink(i,'pubmed_pubmed_citedin')
+    citedby = raw_citedby['linksets'][0]['linksetdbs'][0]['links']
+    for j in citedby:
+      graph_list.append( (j,i) )
+
+  id_list = set()
+  for i in graph_list:
+    id_list.add(i[0])
+    id_list.add(i[1])
+  name_to_id = {}
+  id_to_name = {} 
+  id_counter = 0
+  for vertex in id_list:
+    id_to_name[id_counter] = vertex
+    name_to_id[vertex] = id_counter
+    id_counter += 1
+
+  for i in id_list:
+    raw_metadata = query_pubmed_esummary(i)['result']
+    metadata = raw_metadata[raw_metadata['uids'][0]]
+    article_metadata[i] = {'title':metadata['title']}#,'all_metadata':metadata}
+
+  sanitary_edge_list = []
+  for i, edge in enumerate(graph_list):
+    sanitary_edge_list.append((name_to_id[edge[0]],name_to_id[edge[1]]))
+
+  g = igraph.Graph(sanitary_edge_list,directed=True)
+
+  g.simplify(combine_edges=max)
+  g.vs["name"] = [ id_to_name[v.index] for v in list(g.vs) ]
+  g.vs["label"] = [ article_metadata[i]['title'] for i in g.vs["name"] ]
+
+  layout = g.layout("kk")
+  igraph.plot(g, "tmp.png", layout = layout)
+
