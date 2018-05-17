@@ -20,6 +20,7 @@ parameters = {
   'db':'pubmed',
   'id':'26941329',
   'linkname':'pubmed_pubmed_refs',
+#  'linkname':'pubmed_pubmed_citedin',
   'retmode':'json',
   'tool':'testing_phylr',
   'email':'dchmiller@gmail.com'
@@ -27,6 +28,7 @@ parameters = {
 r = requests.get(
   'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi',
   params=parameters)
+
 
 print(r.url)
 print(r.content)
