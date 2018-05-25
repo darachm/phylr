@@ -4,9 +4,10 @@ import requests
 import argparse
 import igraph
 import neo4j.v1
-
+import time
 
 def query_pubmed_elink(pubmed_id,linkname):
+  global last_query
   print("Querying pubmed for links "+linkname+" of "+str(pubmed_id))
   parameters = {
     'db':'pubmed',
@@ -16,12 +17,16 @@ def query_pubmed_elink(pubmed_id,linkname):
     'tool':tool,
     'email':email,
     }
+  while ( time.time() < last_query + request_frequency ):
+    time.sleep(0.1)
   r = requests.get(
     'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi',
     params=parameters)
+  last_query = time.time()
   return(r.json())
 
 def query_pubmed_esummary(pubmed_id):
+  global last_query
   print("Querying pubmed for summary of "+str(pubmed_id))
   parameters = {
     'db':'pubmed',
@@ -30,76 +35,130 @@ def query_pubmed_esummary(pubmed_id):
     'tool':tool,
     'email':email,
     }
+  while ( time.time() < last_query + request_frequency ):
+    time.sleep(0.1)
   r = requests.get(
     'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi',
     params=parameters)
+  last_query = time.time()
   return(r.json())
 
 class Deal_with_neo4j(object):
+
   def __init__(self,uri="bolt://localhost:7687",
                user="neo4j",password="insecure"):
     self._driver = neo4j.v1.GraphDatabase.driver(uri, auth=(user, password))
+    with self._driver.session() as session:
+      with session.begin_transaction() as tx:
+        tx.run("CREATE CONSTRAINT ON (n:paper) ASSERT n.pubmed_id IS UNIQUE;")
+
   def close(self):
     self._driver.close()
+
   def dump_db(self):
     with self._driver.session() as session:
-      with session.begin_transaction() as tx:
-        result = tx.run("MATCH (n) RETURN (n)")
-        return( list(result.records()) )
-  def pubmed_get_metadata(self,pubmed_id,update_threshold=0):
-    with self._driver.session() as session:
-      with session.begin_transaction() as tx:
-        test_statement = ("MATCH (a:paper {pubmed_id:{pubmed_id}})\n"
-          "  WHERE a.updated > timestamp() - "
-          ""+str(update_threshold)+""
-          "*(1000*60*60*24*365)\n"
-          "RETURN count(a)")
-        if tx.run(test_statement,pubmed_id=pubmed_id).single()[0]:
-          return(0)
-        else:
-          raw_metadata = query_pubmed_esummary(pubmed_id)['result']
-          metadata = raw_metadata[raw_metadata['uids'][0]]
-          statement = ("MERGE (a:paper {pubmed_id:{pubmed_id},"
-            "terminal:'true',title:{title}})\n"
-            "  ON CREATE SET a.updated = timestamp()"
-            "  ON MATCH  SET a.updated = timestamp()")
-          tx.run(statement,pubmed_id=pubmed_id,title=metadata['title'])
-          return(1)
-#
-#        statement = "MERGE ({edge0}:paper {terminal:'true'})"+
-#          "MERGE ({edge1}:paper {terminal:'true'})"+
-#          "MERGE ({edge0})-[r:{type}]->({edge1})"
-#        tx.run(statement,edge0=edge[0],edge1=edge[1],type="cites")
-#        tx.commit_transaction()
-#  pubmed_expand_from(self,pubmed_id)
-  def write_edgelist(self, edgelist):
-    with self._driver.session() as session:
-      with session.begin_transaction() as tx:
-#        statement = "MERGE ({edge0}:paper {terminal:'true'})"+
-#          "MERGE ({edge1}:paper {terminal:'true'})"+
-#          "MERGE ({edge0})-[r:{type}]->({edge1})"
-#        tx.run(statement,edge0=edge[0],edge1=edge[1],type="cites")
-#        tx.commit_transaction()
-        pass
+      result = session.run("MATCH (n) RETURN (n)") #not tested recently 
+      return( list(result.records()) )
 
-#  def print_friends_of(name):
-#    with driver.session() as session:
-#        with session.begin_transaction() as tx:
-#            for record in tx.run("MATCH (a:Person)-[:KNOWS]->(f) "
-#                                 "WHERE a.name = {name} "
-#                                 "RETURN f.name", name=name):
-#                print(record["f.name"])
-#  print_friends_of("Alice")
 
-#      greeting = session.write_transaction(self._create_and_return_greeting, message)
-#      print(greeting)
-#  @staticmethod
-#  def _create_and_return_greeting(tx, message):
-#    result = tx.run("CREATE (a:Greeting) "
-#                    "SET a.message = $message "
-#                    "RETURN a.message + ', from node ' + id(a)", 
-#                    message=message)
-#    return result.single()[0]
+  def pubmed_expand_from(self,pubmed_id,update_threshold=0.5):
+
+    self.pubmed_get_metadata(pubmed_id)
+
+    leaves = []
+
+    with self._driver.session() as session:
+      test_return = self._property_is_current(session,
+        pubmed_id,"expanded_to",update_threshold=update_threshold)
+    if test_return:
+      print(str(pubmed_id)+" expanded_to is current, not updated")
+    else:
+      with self._driver.session() as session:
+        raw_citedin = query_pubmed_elink(pubmed_id,
+          "pubmed_pubmed_citedin")
+        try:
+          list_citedin = raw_citedin["linksets"][0]["linksetdbs"][0]["links"]
+          for upstream in list_citedin:
+            session.run("MERGE (a:paper {pubmed_id:{pubmed_id}})",
+              pubmed_id=upstream) 
+            session.run("MERGE (a:paper {pubmed_id:{pubmed_id}})"
+              " ON MATCH SET a.expanded_to = timestamp()",
+              pubmed_id=pubmed_id) 
+            session.run("MATCH (a:paper {pubmed_id:{node0_id}}),"
+              "(b:paper {pubmed_id:{node1_id}})\n"
+              "MERGE (a)-[r:cites]->(b)",
+              node0_id=upstream,node1_id=pubmed_id)
+          leaves.extend(list_citedin)
+        except:
+          pass
+
+    with self._driver.session() as session:
+      test_return = self._property_is_current(session,
+        pubmed_id,"expanded_from",update_threshold=update_threshold)
+    if test_return:
+      print(str(pubmed_id)+" expanded_from is current, not updated")
+    else:
+      with self._driver.session() as session:
+        raw_refs = query_pubmed_elink(pubmed_id,
+          "pubmed_pubmed_refs")
+        try:
+          list_refs = raw_refs["linksets"][0]["linksetdbs"][0]["links"]
+          for downstream in list_refs:
+            session.run("MERGE (a:paper {pubmed_id:{pubmed_id}})"
+              " ON MATCH SET a.expanded_from = timestamp()",
+              pubmed_id=pubmed_id) 
+            session.run("MERGE (a:paper {pubmed_id:{pubmed_id}})",
+              pubmed_id=downstream) 
+            session.run("MATCH (a:paper {pubmed_id:{node0_id}}),"
+              "(b:paper {pubmed_id:{node1_id}})\n"
+              "MERGE (a)-[r:cites]->(b)",
+              node0_id=pubmed_id,node1_id=downstream)
+          leaves.extend(list_refs)
+        except:
+          pass
+
+    for i in leaves:
+      with self._driver.session() as session:
+        session.run("MERGE (a:paper {pubmed_id:{pubmed_id}})"
+          " ON MATCH SET a.leaf = 1",
+          pubmed_id=i) 
+
+    with self._driver.session() as session:
+      session.run("MERGE (a:paper {pubmed_id:{pubmed_id}})"
+        " ON MATCH SET a.leaf = 0",
+        pubmed_id=pubmed_id) 
+
+    return(leaves)
+
+  @staticmethod
+  def _property_is_current(session,pubmed_id,which_property,
+                           update_threshold=0.0):
+    result = session.run("MATCH (a:paper {pubmed_id:"+str(pubmed_id)+"})\n"
+      "  WHERE coalesce(a."+which_property+",0) > timestamp() - "
+      ""+str(update_threshold)+"" # so this is the year past
+      "*(1000*60*60*24*365)\n"
+      "RETURN count(a)")
+    return(result.single()[0])
+
+  def pubmed_get_metadata(self,pubmed_id,update_threshold=0.5):
+    with self._driver.session() as session:
+      if self._property_is_current(session,
+          pubmed_id,"updated",update_threshold=update_threshold):
+        return(0)
+      else:
+        raw_metadata = query_pubmed_esummary(pubmed_id)['result']
+        metadata = raw_metadata[raw_metadata['uids'][0]]
+        statement = ("MERGE (a:paper {pubmed_id:{pubmed_id}})"
+          "  SET a.title = {title}\n"
+          "  SET a.updated = timestamp()")
+        session.run(statement,pubmed_id=pubmed_id,title=metadata['title'])
+        return(0)
+
+  def get_leaf_list(self):
+    with self._driver.session() as session:
+      result = session.run("MATCH (a:paper) WHERE a.leaf > 0 "
+        "RETURN a.pubmed_id")
+      return(list(result.records()))
 
 
 if __name__=="__main__":
@@ -111,22 +170,9 @@ if __name__=="__main__":
 
   email = "dchmiller@gmail.com"
   tool = "phylr_v0.0"
-  today = 180517
 
-  phylr_db = Deal_with_neo4j()
-
-  print(phylr_db.pubmed_get_metadata(26941329,update_threshold=0.5))
-#  phylr_db.pubmed_expand_from(26941329)
-
-
-  print()
-  print(phylr_db.dump_db())
-
-  exit(1)
-
-
-
-
+  last_query = time.time()
+  request_frequency = 1 # second
 
   parser = argparse.ArgumentParser(description='')
   parser.add_argument('--import_pubmed_ids',  action="store", nargs="+",
@@ -137,6 +183,30 @@ if __name__=="__main__":
   parser.add_argument('--render_igraph', action="store_true",
     help="Should I make an igraph object from this database?")
   args = parser.parse_args()
+
+  phylr_db = Deal_with_neo4j()
+
+  first_leaves = []
+
+  for each_query in args.import_pubmed_ids:
+    first_leaves.extend(phylr_db.pubmed_expand_from(each_query))
+
+  these_new_leaves = first_leaves
+  for i in range(1):
+    this_batch = these_new_leaves
+    these_new_leaves = []
+    for each_leaf in this_batch:
+      these_new_leaves.extend(phylr_db.pubmed_expand_from(each_leaf))
+
+  for j in [i[0] for i in phylr_db.get_leaf_list()]:
+    phylr_db.pubmed_get_metadata(j)
+
+  exit(0)
+
+
+
+
+
 
   article_metadata = {}
   graph_list = []
